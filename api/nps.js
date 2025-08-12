@@ -58,7 +58,7 @@ module.exports = async (req, res) => {
   const body = {
     ticket: {
       comment: {
-        body: `NPS: ${score}/10\n${why ? `Motivo: ${why}\n` : ""}${improve ? `Melhorias: ${improve}\n` : ""}Origem: NPS (form)`,
+        body: `NPS: ${score}/10\n${why ? `Motivo: ${why}\n` : ""}${improve ? `Melhorias: ${improve}\n` : ""}Origem: NPS`,
         public: false
       },
       ...(custom_fields.length ? { custom_fields } : {}),
