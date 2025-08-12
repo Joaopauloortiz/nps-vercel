@@ -1,88 +1,64 @@
 // api/nps.js
-// Vercel Serverless Function (Node.js)
-
 module.exports = async (req, res) => {
   const {
-    ZENDESK_SUBDOMAIN,    // ex.: d3v-sisconsulting
-    ZENDESK_EMAIL,        // ex.: jp@sisconsulting.com.br
-    ZENDESK_API_TOKEN,    // token da API
-    NPS_FIELD_ID,         // opcional - ID do campo numérico NPS
-    WHY_FIELD_ID,         // opcional - ID do campo texto "por quê?"
-    IMPROVE_FIELD_ID,     // opcional - ID do campo texto "o que melhorar?"
-    ALLOWED_ORIGIN        // ex.: https://d3v-sisconsulting.zendesk.com (pode ser lista separada por vírgula)
+    ZENDESK_SUBDOMAIN, ZENDESK_EMAIL, ZENDESK_API_TOKEN,
+    NPS_FIELD_ID, WHY_FIELD_ID, IMPROVE_FIELD_ID, ALLOWED_ORIGIN
   } = process.env;
 
-  // ======== CORS ========
+  // --- CORS base (sempre mandar no preflight) ---
   const origin = req.headers.origin || "";
   const allowList = (ALLOWED_ORIGIN || "").split(",").map(s => s.trim()).filter(Boolean);
-  const isAllowedOrigin = allowList.length > 0 && allowList.includes(origin);
+  const isAllowed = allowList.length > 0 && allowList.includes(origin);
 
-  function setCors() {
-    if (isAllowedOrigin) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
-    }
-    res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-    res.setHeader("Access-Control-Max-Age", "600");
-  }
-
-  setCors();
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Max-Age", "600");
 
   if (req.method === "OPTIONS") {
-    res.status(204).end();
-    return;
+    // Garanta que o navegador receba ACAO no preflight
+    res.setHeader("Access-Control-Allow-Origin", origin || "*");
+    return res.status(204).end();
   }
+
+  if (!isAllowed) {
+    // Inclui ACAO também no erro pra evitar “Failed to fetch” genérico
+    res.setHeader("Access-Control-Allow-Origin", origin || "*");
+    return res.status(403).json({ error: "origin_forbidden" });
+  }
+
+  // Para requisição real, também inclua ACAO
+  res.setHeader("Access-Control-Allow-Origin", origin);
 
   if (req.method !== "POST") {
-    res.status(405).json({ error: "method_not_allowed" });
-    return;
+    return res.status(405).json({ error: "method_not_allowed" });
   }
 
-  if (!isAllowedOrigin) {
-    res.status(403).json({ error: "origin_forbidden" });
-    return;
-  }
-
-  // ======== Validação de envs ========
   if (!ZENDESK_SUBDOMAIN || !ZENDESK_EMAIL || !ZENDESK_API_TOKEN) {
-    res.status(500).json({ error: "server_misconfigured" });
-    return;
+    return res.status(500).json({ error: "server_misconfigured" });
   }
 
-  // ======== Parse do body ========
-  let bodyStr = "";
-  try {
-    for await (const chunk of req) bodyStr += chunk;
-  } catch {}
+  // Body
+  let raw = "";
+  for await (const ch of req) raw += ch;
   let data = {};
-  try {
-    data = JSON.parse(bodyStr || "{}");
-  } catch {
-    res.status(400).json({ error: "invalid_json" });
-    return;
-  }
+  try { data = JSON.parse(raw || "{}"); } catch { return res.status(400).json({ error: "invalid_json" }); }
 
   const { ticketId, score, why, improve } = data || {};
   if (!ticketId || typeof score !== "number") {
-    res.status(400).json({ error: "ticketId_and_score_required" });
-    return;
+    return res.status(400).json({ error: "ticketId_and_score_required" });
   }
 
-  // ======== Monta payload do Zendesk ========
+  // Payload Zendesk
   const custom_fields = [];
   if (NPS_FIELD_ID)     custom_fields.push({ id: Number(NPS_FIELD_ID), value: Number(score) });
   if (WHY_FIELD_ID)     custom_fields.push({ id: Number(WHY_FIELD_ID), value: String(why || "") });
   if (IMPROVE_FIELD_ID) custom_fields.push({ id: Number(IMPROVE_FIELD_ID), value: String(improve || "") });
 
-  const zendeskBody = {
+  const body = {
     ticket: {
       comment: {
-        body:
-          `NPS: ${score}/10\\n` +
-          (why ? `Motivo: ${why}\\n` : "") +
-          (improve ? `Melhorias: ${improve}\\n` : "") +
-          `Origem: NPS (form)`,
+        body: `NPS: ${score}/10\n${why ? `Motivo: ${why}\n` : ""}${improve ? `Melhorias: ${improve}\n` : ""}Origem: NPS (form)`,
         public: false
       },
       ...(custom_fields.length ? { custom_fields } : {}),
@@ -90,28 +66,22 @@ module.exports = async (req, res) => {
     }
   };
 
-  const url = `https://${ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${encodeURIComponent(ticketId)}.json`;
+  const url   = `https://${ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${encodeURIComponent(ticketId)}.json`;
   const basic = Buffer.from(`${ZENDESK_EMAIL}/token:${ZENDESK_API_TOKEN}`).toString("base64");
 
   try {
     const resp = await fetch(url, {
       method: "PUT",
-      headers: {
-        "Authorization": `Basic ${basic}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(zendeskBody)
+      headers: { "Authorization": `Basic ${basic}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body)
     });
-
     if (!resp.ok) {
       const detail = await resp.text().catch(() => "");
-      res.status(resp.status).json({ error: "zendesk_error", detail });
-      return;
+      return res.status(resp.status).json({ error: "zendesk_error", detail });
     }
-
     res.json({ ok: true });
-  } catch (err) {
-    console.error("Zendesk call failed:", err);
+  } catch (e) {
+    console.error(e);
     res.status(500).json({ error: "internal_error" });
   }
 };
